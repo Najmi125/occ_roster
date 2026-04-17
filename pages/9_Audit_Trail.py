@@ -98,7 +98,7 @@ else:
         mime="text/csv"
     )
 
-    # --- Color by action type ---
+# --- Color by action type ---
     def color_action(row):
         colors = {
             'CREW_SWAP':         'background-color: #eef3fb',  # light blue
@@ -107,43 +107,27 @@ else:
             'FLIGHT_DIVERTED':   'background-color: #f3eefb',  # light purple
             'FLIGHT_ADDED':      'background-color: #eefbea',  # light green
         }
+        # Note: 'Action' must match the column name you set below
         color = colors.get(row['Action'], '')
         return [color] * len(row)
 
-    # These lines should remain at the same level as 'def' (inside the else block)
+    # 1. Select the data
     display_df = df[[
         'timestamp', 'action_type', 'affected_flight',
         'old_crew_id', 'new_crew_id', 'old_value',
         'new_value', 'remarks', 'system_generated'
     ]].copy()
-"""
-    # --- Color by action type ---
-    def color_action(row):
-    colors = {
-        'CREW_SWAP':         'background-color: #eef3fb',  # light blue
-        'FLIGHT_CANCELLED':  'background-color: #fbeeee',  # light red
-        'FLIGHT_DELAYED':    'background-color: #f6f5f2',  # light brown
-        'FLIGHT_DIVERTED':   'background-color: #f3eefb',  # light purple
-        'FLIGHT_ADDED':      'background-color: #eefbea',  # light green
-    }
-    color = colors.get(row['Action'], '')
-    return [color] * len(row)
 
-    display_df = df[[
-        'timestamp', 'action_type', 'affected_flight',
-        'old_crew_id', 'new_crew_id', 'old_value',
-        'new_value', 'remarks', 'system_generated'
-    ]].copy()
-"""
+    # 2. Rename columns for the UI
     display_df.columns = [
         'Time', 'Action', 'Flight',
         'Old Crew', 'New Crew', 'Old Value',
         'New Value', 'Remarks', 'System'
     ]
 
+    # 3. Apply styling and display
     styled = display_df.style.apply(color_action, axis=1)
     st.dataframe(styled, use_container_width=True, height=600)
-
     # --- Detail Expander ---
     st.divider()
     st.subheader("🔍 Action Detail")
