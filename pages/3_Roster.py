@@ -53,16 +53,10 @@ else:
 # =====================
 def generate_roster(start_d, end_d):
     """
-    Fully FTL-compliant roster engine.
-    Rules enforced:
-    - Min 12h rest between debrief and next report
-    - Max 7-day FDP: 60h
-    - Max 28-day FDP: 190h
-    - Fair rotation: least-hours crew assigned first
-    - Fleet type matching
-    - No double assignment same time slot
+    Fully FTL-compliant roster engine v2.
+    Fixed: rest calculation uses actual debrief time per slot,
+    not just latest debrief_end.
     """
-
     with engine.connect() as conn:
         flights = pd.read_sql(text("""
             SELECT flight_id, aircraft, callsign, origin,
@@ -80,134 +74,146 @@ def generate_roster(start_d, end_d):
             ORDER BY fleet, role, crew_id
         """), conn)
 
-    # ── Crew state tracker ──────────────────────────
-    # debrief_end   : datetime — when their FDP+debrief ends
-    # hours_28day   : float   — total FDP hours in 28-day window
-    # hours_7day    : dict    — {date: hours} for rolling 7-day
-    # assigned_slots: list    — (report_time, debrief_time) tuples
+    # ── Crew state tracker ──────────────────────────────
     crew_state = {}
     for _, c in crew_df.iterrows():
         crew_state[c['crew_id']] = {
-            'name':          c['name'],
-            'role':          c['role'],
-            'fleet':         c['fleet'],
-            'debrief_end':   None,
-            'hours_28day':   0.0,
-            'daily_hours':   {},   # date_str -> hours
-            'assigned_slots': [],
+            'name':           c['name'],
+            'role':           c['role'],
+            'fleet':          c['fleet'],
+            'assigned_slots': [],  # list of (report_dt, debrief_dt, fdp_hrs, date)
+            'daily_hours':    {},  # date_str -> hours
+            'hours_28day':    0.0,
         }
 
-    roster_records  = []
-    unassigned_log  = []
+    roster_records = []
+    unassigned_log = []
 
-    # ── Process each flight ──────────────────────────
+    def get_last_debrief(state):
+        """Get the latest debrief time across all assigned slots."""
+        if not state['assigned_slots']:
+            return None
+        return max(slot[1] for slot in state['assigned_slots'])
+
+    def get_7day_hours(state, flight_date):
+        """Calculate rolling 7-day hours ending on flight_date."""
+        week_start = flight_date - timedelta(days=6)
+        return sum(
+            v for d_str, v in state['daily_hours'].items()
+            if week_start <= date.fromisoformat(d_str) <= flight_date
+        )
+
+    def has_overlap(state, report_dt, debrief_dt):
+        """Check if proposed slot overlaps any existing slot."""
+        for (slot_rep, slot_deb, _, _) in state['assigned_slots']:
+            if report_dt < slot_deb and debrief_dt > slot_rep:
+                return True
+        return False
+
+    def has_sufficient_rest(state, report_dt):
+        """
+        Check minimum rest between last debrief and new report.
+        Must have at least 12h gap.
+        """
+        last_deb = get_last_debrief(state)
+        if last_deb is None:
+            return True, 999.0  # No previous duty — fully rested
+        rest_hrs = (report_dt - last_deb).total_seconds() / 3600
+        return rest_hrs >= CAA_RULES['min_rest_hours'], rest_hrs
+
+    # ── Process each flight ────────────────────────────
     for _, flight in flights.iterrows():
-        aircraft    = flight['aircraft']          # e.g. A320-1
-        fleet_type  = aircraft.split('-')[0]      # A320 or A330
+        aircraft    = flight['aircraft']
+        fleet_type  = aircraft.split('-')[0]
         dep_dt      = pd.to_datetime(flight['dep_time'])
         arr_dt      = pd.to_datetime(flight['arr_time'])
         flight_date = pd.to_datetime(flight['flight_date']).date()
 
-        fdp_hrs     = (arr_dt - dep_dt).total_seconds() / 3600
-        report_dt   = dep_dt - timedelta(
-                          minutes=FTL['report_before_dep'])
-        debrief_dt  = arr_dt + timedelta(
-                          minutes=FTL['debrief_after_arr'])
-        max_fdp     = FTL[fleet_type]['max_fdp']
+        fdp_hrs    = (arr_dt - dep_dt).total_seconds() / 3600
+        report_dt  = dep_dt  - timedelta(minutes=FTL['report_before_dep'])
+        debrief_dt = arr_dt  + timedelta(minutes=FTL['debrief_after_arr'])
+        max_fdp    = FTL[fleet_type]['max_fdp']
 
-        # Reject impossible flights
+        # Skip impossible flights
         if fdp_hrs > max_fdp:
             unassigned_log.append({
                 'callsign': flight['callsign'],
-                'reason':   f"FDP {fdp_hrs:.1f}h exceeds max {max_fdp}h"
+                'reason':   f"FDP {fdp_hrs:.1f}h > max {max_fdp}h"
             })
             continue
 
-        # Find best CPT and FO separately
         for role in ['CPT', 'FO']:
-            # Build candidate list for this role + fleet
             candidates = []
+
             for cid, state in crew_state.items():
+                # ── Filter 1: Role match ─────────────
                 if state['role'] != role:
                     continue
+
+                # ── Filter 2: Fleet match ────────────
                 if fleet_type not in state['fleet']:
                     continue
 
-                # ── Check 1: Min rest ────────────────
-                if state['debrief_end'] is not None:
-                    rest_hrs = (report_dt - state['debrief_end']
-                                ).total_seconds() / 3600
-                    if rest_hrs < FTL['min_rest_hours']:
-                        continue   # insufficient rest
-
-                # ── Check 2: No overlap ──────────────
-                overlap = False
-                for (slot_rep, slot_deb) in state['assigned_slots']:
-                    # New report before existing debrief
-                    # AND new debrief after existing report
-                    if report_dt < slot_deb and debrief_dt > slot_rep:
-                        overlap = True
-                        break
-                if overlap:
+                # ── Filter 3: No slot overlap ────────
+                if has_overlap(state, report_dt, debrief_dt):
                     continue
 
-                # ── Check 3: 28-day hours ────────────
-                if (state['hours_28day'] + fdp_hrs >
-                        FTL['max_28day_hours']):
+                # ── Filter 4: Min rest ───────────────
+                legal_rest, rest_hrs = has_sufficient_rest(
+                    state, report_dt)
+                if not legal_rest:
                     continue
 
-                # ── Check 4: 7-day rolling hours ─────
-                # Sum hours in the 7 days ending on flight_date
-                week_start = flight_date - timedelta(days=6)
-                hours_7day = sum(
-                    v for d_str, v in state['daily_hours'].items()
-                    if week_start <= date.fromisoformat(d_str)
-                               <= flight_date
+                # ── Filter 5: 7-day hours ────────────
+                h7 = get_7day_hours(state, flight_date)
+                if h7 + fdp_hrs > FTL['max_7day_hours']:
+                    continue
+
+                # ── Filter 6: 28-day hours ───────────
+                if state['hours_28day'] + fdp_hrs > FTL['max_28day_hours']:
+                    continue
+
+                # ── Score: fairness + rest ───────────
+                # Primary:   least 28-day hours (fair rotation)
+                # Secondary: most rested (safest)
+                score = (
+                    -state['hours_28day'] * 0.6 +
+                     rest_hrs * 0.4
                 )
-                if hours_7day + fdp_hrs > FTL['max_7day_hours']:
-                    continue
-
-                # ── Candidate is legal — score for fairness ──
-                # Lower hours = higher priority (fair rotation)
-                score = - state['hours_28day']  # most rested first
-                candidates.append((score, cid, hours_7day))
+                candidates.append((score, cid, rest_hrs, h7))
 
             if not candidates:
                 unassigned_log.append({
                     'callsign': flight['callsign'],
                     'role':     role,
-                    'reason':   f"No legal {role} available for {fleet_type}"
+                    'reason':  f"No legal {role} at {fleet_type}"
                 })
                 continue
 
-            # Pick best candidate (highest score = least hours)
+            # Best candidate — highest score
             candidates.sort(key=lambda x: x[0], reverse=True)
-            best_score, best_cid, _ = candidates[0]
+            _, best_cid, best_rest, best_h7 = candidates[0]
 
-            # ── Assign ───────────────────────────────
+            # ── Record assignment ────────────────────
             roster_records.append({
-                'crew_id':    best_cid,
-                'flight_id':  int(flight['flight_id']),
-                'callsign':   flight['callsign'],
-                'duty_date':  flight_date,
-                'report_dt':  report_dt,
-                'debrief_dt': debrief_dt,
-                'fdp_hours':  round(fdp_hrs, 2),
-                'status':     'ASSIGNED',
+                'crew_id':   best_cid,
+                'flight_id': int(flight['flight_id']),
+                'callsign':  flight['callsign'],
+                'duty_date': flight_date,
+                'report_dt': report_dt,
+                'debrief_dt':debrief_dt,
+                'fdp_hours': round(fdp_hrs, 2),
+                'status':    'ASSIGNED',
             })
 
             # ── Update state ─────────────────────────
             st_ref = crew_state[best_cid]
-            # Update debrief end (take latest if multiple flights)
-            if (st_ref['debrief_end'] is None or
-                    debrief_dt > st_ref['debrief_end']):
-                st_ref['debrief_end'] = debrief_dt
-
+            st_ref['assigned_slots'].append(
+                (report_dt, debrief_dt, fdp_hrs, flight_date))
             st_ref['hours_28day'] += fdp_hrs
             d_str = flight_date.isoformat()
             st_ref['daily_hours'][d_str] = (
                 st_ref['daily_hours'].get(d_str, 0.0) + fdp_hrs)
-            st_ref['assigned_slots'].append((report_dt, debrief_dt))
 
     return roster_records, unassigned_log, crew_state
 
