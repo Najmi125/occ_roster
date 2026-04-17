@@ -100,6 +100,25 @@ else:
 
     # --- Color by action type ---
     def color_action(row):
+        colors = {
+            'CREW_SWAP':         'background-color: #eef3fb',  # light blue
+            'FLIGHT_CANCELLED':  'background-color: #fbeeee',  # light red
+            'FLIGHT_DELAYED':    'background-color: #f6f5f2',  # light brown
+            'FLIGHT_DIVERTED':   'background-color: #f3eefb',  # light purple
+            'FLIGHT_ADDED':      'background-color: #eefbea',  # light green
+        }
+        color = colors.get(row['Action'], '')
+        return [color] * len(row)
+
+    # These lines should remain at the same level as 'def' (inside the else block)
+    display_df = df[[
+        'timestamp', 'action_type', 'affected_flight',
+        'old_crew_id', 'new_crew_id', 'old_value',
+        'new_value', 'remarks', 'system_generated'
+    ]].copy()
+"""
+    # --- Color by action type ---
+    def color_action(row):
     colors = {
         'CREW_SWAP':         'background-color: #eef3fb',  # light blue
         'FLIGHT_CANCELLED':  'background-color: #fbeeee',  # light red
@@ -115,7 +134,7 @@ else:
         'old_crew_id', 'new_crew_id', 'old_value',
         'new_value', 'remarks', 'system_generated'
     ]].copy()
-
+"""
     display_df.columns = [
         'Time', 'Action', 'Flight',
         'Old Crew', 'New Crew', 'Old Value',
