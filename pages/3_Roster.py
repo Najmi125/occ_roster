@@ -3,6 +3,8 @@ import pandas as pd
 from utils.db import get_engine
 from sqlalchemy import text
 from datetime import date, timedelta, datetime
+from utils.ftl_validator import (generate_compliance_report,
+                                  save_violations, CAA_RULES)
 
 st.set_page_config(page_title="28 Day Roster", page_icon="📋", layout="wide")
 st.title("📋 28 Day Rolling Crew Roster")
