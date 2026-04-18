@@ -3,29 +3,22 @@ import pandas as pd
 from utils.db import get_engine
 from sqlalchemy import text
 from datetime import date, timedelta, datetime
-from utils.ftl_validator import (generate_compliance_report,
-                                  save_violations, CAA_RULES)
+from utils.ftl_validator import (
+    generate_compliance_report,
+    save_violations,
+    CAA_RULES
+)
 
-st.set_page_config(page_title="28 Day Roster", page_icon="📋", layout="wide")
+st.set_page_config(
+    page_title="28 Day Roster",
+    page_icon="📋",
+    layout="wide"
+)
 st.title("📋 28 Day Rolling Crew Roster")
 
 engine = get_engine()
-today = date.today()
+today    = date.today()
 end_date = today + timedelta(days=27)
-
-# =====================
-# CAA PAKISTAN FTL RULES
-# =====================
-FTL = {
-    'A320': {'max_fdp': 13.0, 'max_sectors': 6},
-    'A330': {'max_fdp': 14.0, 'max_sectors': 4},
-    'min_rest_hours':  12.0,
-    'max_7day_hours':  60.0,
-    'max_28day_hours': 190.0,
-    'max_annual_hours': 900.0,
-    'report_before_dep': 60,   # minutes
-    'debrief_after_arr': 30,   # minutes
-}
 
 # =====================
 # FILTERS
@@ -41,9 +34,11 @@ with col1:
     )
 with col2:
     fleet_filter = st.selectbox(
-        "Fleet", ["ALL","A320-1","A320-2","A320-3","A330-1","A330-2"])
+        "Fleet",
+        ["ALL", "A320-1", "A320-2", "A320-3", "A330-1", "A330-2"]
+    )
 with col3:
-    role_filter = st.selectbox("Role", ["ALL","CPT","FO"])
+    role_filter = st.selectbox("Role", ["ALL", "CPT", "FO"])
 
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start_d, end_d = date_range
@@ -51,14 +46,19 @@ else:
     start_d = end_d = date_range
 
 # =====================
-# ROSTER ENGINE
+# ROSTER ENGINE v2
+# Single source of truth: CAA_RULES from ftl_validator
 # =====================
 def generate_roster(start_d, end_d):
     """
-    Fully FTL-compliant roster engine v2.
-    Fixed: rest calculation uses actual debrief time per slot,
-    not just latest debrief_end.
+    FTL-compliant roster engine v2.
+    - Uses CAA_RULES as single source of truth
+    - Rest check uses actual per-slot debrief times
+    - Fair rotation: least hours crew assigned first
+    - 7-day and 28-day rolling hour caps enforced
+    - Overlap detection per crew slot
     """
+
     with engine.connect() as conn:
         flights = pd.read_sql(text("""
             SELECT flight_id, aircraft, callsign, origin,
@@ -80,25 +80,24 @@ def generate_roster(start_d, end_d):
     crew_state = {}
     for _, c in crew_df.iterrows():
         crew_state[c['crew_id']] = {
-            'name':           c['name'],
-            'role':           c['role'],
-            'fleet':          c['fleet'],
-            'assigned_slots': [],  # list of (report_dt, debrief_dt, fdp_hrs, date)
-            'daily_hours':    {},  # date_str -> hours
-            'hours_28day':    0.0,
+            'name':            c['name'],
+            'role':            c['role'],
+            'fleet':           c['fleet'],
+            'assigned_slots':  [],   # (report_dt, debrief_dt, fdp_hrs, date)
+            'daily_hours':     {},   # date_str -> float hours
+            'hours_28day':     0.0,
         }
 
     roster_records = []
     unassigned_log = []
 
+    # ── Helper functions ────────────────────────────────
     def get_last_debrief(state):
-        """Get the latest debrief time across all assigned slots."""
         if not state['assigned_slots']:
             return None
         return max(slot[1] for slot in state['assigned_slots'])
 
     def get_7day_hours(state, flight_date):
-        """Calculate rolling 7-day hours ending on flight_date."""
         week_start = flight_date - timedelta(days=6)
         return sum(
             v for d_str, v in state['daily_hours'].items()
@@ -106,78 +105,76 @@ def generate_roster(start_d, end_d):
         )
 
     def has_overlap(state, report_dt, debrief_dt):
-        """Check if proposed slot overlaps any existing slot."""
         for (slot_rep, slot_deb, _, _) in state['assigned_slots']:
             if report_dt < slot_deb and debrief_dt > slot_rep:
                 return True
         return False
 
     def has_sufficient_rest(state, report_dt):
-        """
-        Check minimum rest between last debrief and new report.
-        Must have at least 12h gap.
-        """
         last_deb = get_last_debrief(state)
         if last_deb is None:
-            return True, 999.0  # No previous duty — fully rested
+            return True, 999.0
         rest_hrs = (report_dt - last_deb).total_seconds() / 3600
         return rest_hrs >= CAA_RULES['min_rest_hours'], rest_hrs
 
-    # ── Process each flight ────────────────────────────
+    # ── Process each flight ─────────────────────────────
     for _, flight in flights.iterrows():
         aircraft    = flight['aircraft']
-        fleet_type  = aircraft.split('-')[0]
+        fleet_type  = aircraft.split('-')[0]   # A320 or A330
         dep_dt      = pd.to_datetime(flight['dep_time'])
         arr_dt      = pd.to_datetime(flight['arr_time'])
         flight_date = pd.to_datetime(flight['flight_date']).date()
 
         fdp_hrs    = (arr_dt - dep_dt).total_seconds() / 3600
-        report_dt  = dep_dt  - timedelta(minutes=FTL['report_before_dep'])
-        debrief_dt = arr_dt  + timedelta(minutes=FTL['debrief_after_arr'])
-        max_fdp    = FTL[fleet_type]['max_fdp']
+        report_dt  = dep_dt  - timedelta(
+                         minutes=CAA_RULES['report_before_dep'])
+        debrief_dt = arr_dt  + timedelta(
+                         minutes=CAA_RULES['debrief_after_arr'])
+        max_fdp    = CAA_RULES['max_fdp'][fleet_type]
 
-        # Skip impossible flights
+        # Skip flights that exceed max FDP
         if fdp_hrs > max_fdp:
             unassigned_log.append({
                 'callsign': flight['callsign'],
-                'reason':   f"FDP {fdp_hrs:.1f}h > max {max_fdp}h"
+                'reason':   f"FDP {fdp_hrs:.1f}h exceeds max {max_fdp}h"
             })
             continue
 
+        # Assign CPT then FO
         for role in ['CPT', 'FO']:
             candidates = []
 
             for cid, state in crew_state.items():
-                # ── Filter 1: Role match ─────────────
+
+                # Filter 1: Role
                 if state['role'] != role:
                     continue
 
-                # ── Filter 2: Fleet match ────────────
+                # Filter 2: Fleet type
                 if fleet_type not in state['fleet']:
                     continue
 
-                # ── Filter 3: No slot overlap ────────
+                # Filter 3: No overlapping duty
                 if has_overlap(state, report_dt, debrief_dt):
                     continue
 
-                # ── Filter 4: Min rest ───────────────
+                # Filter 4: Minimum rest
                 legal_rest, rest_hrs = has_sufficient_rest(
                     state, report_dt)
                 if not legal_rest:
                     continue
 
-                # ── Filter 5: 7-day hours ────────────
+                # Filter 5: 7-day rolling hours
                 h7 = get_7day_hours(state, flight_date)
-                if h7 + fdp_hrs > FTL['max_7day_hours']:
+                if h7 + fdp_hrs > CAA_RULES['max_7day_hours']:
                     continue
 
-                # ── Filter 6: 28-day hours ───────────
-                if state['hours_28day'] + fdp_hrs > FTL['max_28day_hours']:
+                # Filter 6: 28-day hours
+                if (state['hours_28day'] + fdp_hrs >
+                        CAA_RULES['max_28day_hours']):
                     continue
 
-                # ── Score: fairness + rest ───────────
-                # Primary:   least 28-day hours (fair rotation)
-                # Secondary: most rested (safest)
+                # Score — fair rotation + rest
                 score = (
                     -state['hours_28day'] * 0.6 +
                      rest_hrs * 0.4
@@ -188,27 +185,27 @@ def generate_roster(start_d, end_d):
                 unassigned_log.append({
                     'callsign': flight['callsign'],
                     'role':     role,
-                    'reason':  f"No legal {role} at {fleet_type}"
+                    'reason':   f"No legal {role} for {fleet_type}"
                 })
                 continue
 
-            # Best candidate — highest score
+            # Pick highest score
             candidates.sort(key=lambda x: x[0], reverse=True)
             _, best_cid, best_rest, best_h7 = candidates[0]
 
-            # ── Record assignment ────────────────────
+            # Record
             roster_records.append({
-                'crew_id':   best_cid,
-                'flight_id': int(flight['flight_id']),
-                'callsign':  flight['callsign'],
-                'duty_date': flight_date,
-                'report_dt': report_dt,
-                'debrief_dt':debrief_dt,
-                'fdp_hours': round(fdp_hrs, 2),
-                'status':    'ASSIGNED',
+                'crew_id':    best_cid,
+                'flight_id':  int(flight['flight_id']),
+                'callsign':   flight['callsign'],
+                'duty_date':  flight_date,
+                'report_dt':  report_dt,
+                'debrief_dt': debrief_dt,
+                'fdp_hours':  round(fdp_hrs, 2),
+                'status':     'ASSIGNED',
             })
 
-            # ── Update state ─────────────────────────
+            # Update state
             st_ref = crew_state[best_cid]
             st_ref['assigned_slots'].append(
                 (report_dt, debrief_dt, fdp_hrs, flight_date))
@@ -254,47 +251,83 @@ if st.button("🔄 Generate / Refresh Roster", type="primary"):
                 })
             conn.commit()
 
-        st.success(f"✅ Roster generated — "
-                   f"{len(records)} assignments | "
-                   f"{len(unassigned)} unassigned")
+    st.success(
+        f"✅ Roster generated — "
+        f"{len(records)} assignments | "
+        f"{len(unassigned)} unassigned"
+    )
 
-        # Show utilization summary
-        st.markdown("#### 📊 Crew Utilization Summary")
-        util_rows = []
-        for cid, state in crew_state.items():
-            if state['hours_28day'] > 0:
-                util_rows.append({
-                    'Crew ID': cid,
-                    'Name':    state['name'],
-                    'Role':    state['role'],
-                    'Fleet':   state['fleet'],
-                    '28D Hrs': round(state['hours_28day'], 1),
-                    'Duties':  len(state['assigned_slots']),
-                    'Status':  (
-                        '🔴 OVER' if state['hours_28day'] > 190
-                        else '🟡 HIGH' if state['hours_28day'] > 150
-                        else '✅ OK'
-                    )
-                })
+    # ── FTL Post-Validation ──────────────────────────
+    with st.spinner("Running CAA Pakistan FTL validation..."):
+        ftl_result = generate_compliance_report(start_d, end_d)
+        s = ftl_result['summary']
 
+    if s['violations'] == 0 and s['warnings'] == 0:
+        st.success(
+            f"✅ FTL Validation PASSED — "
+            f"100% compliant | "
+            f"{s['total_duties']} duties validated"
+        )
+    elif s['violations'] > 0:
+        st.error(
+            f"🔴 FTL VIOLATIONS — "
+            f"{s['violations']} violations | "
+            f"{s['warnings']} warnings | "
+            f"{s['compliance_pct']}% compliant"
+        )
+        for v in ftl_result['violations'][:5]:
+            st.error(f"🔴 {v['crew_name']} — {v['details']}")
+    else:
+        st.warning(
+            f"🟡 FTL Warnings — "
+            f"{s['warnings']} warnings | "
+            f"{s['compliance_pct']}% compliant"
+        )
+        for w in ftl_result['warnings'][:5]:
+            st.warning(f"🟡 {w['crew_name']} — {w['details']}")
+
+    # ── Utilization Summary ──────────────────────────
+    st.markdown("#### 📊 Crew Utilization")
+    util_rows = []
+    for cid, state in crew_state.items():
+        if state['hours_28day'] > 0:
+            util_rows.append({
+                'Crew ID': cid,
+                'Name':    state['name'],
+                'Role':    state['role'],
+                'Fleet':   state['fleet'],
+                '28D Hrs': round(state['hours_28day'], 1),
+                'Duties':  len(state['assigned_slots']),
+                'Status': (
+                    '🔴 OVER'  if state['hours_28day'] > 190
+                    else '🟡 HIGH' if state['hours_28day'] > 150
+                    else '✅ OK'
+                )
+            })
+
+    if util_rows:
         util_df = pd.DataFrame(util_rows).sort_values(
             '28D Hrs', ascending=False)
 
         def color_util(row):
             if '🔴' in str(row['Status']):
-                return ['background-color:#4a0000']*len(row)
+                return ['background-color:#4a0000'] * len(row)
             if '🟡' in str(row['Status']):
-                return ['background-color:#4a3000']*len(row)
-            return ['']*len(row)
+                return ['background-color:#4a3000'] * len(row)
+            return [''] * len(row)
 
         st.dataframe(
             util_df.style.apply(color_util, axis=1),
-            use_container_width=True, height=300)
+            use_container_width=True,
+            height=300
+        )
 
-        if unassigned:
-            st.warning(f"⚠️ {len(unassigned)} unassigned slots")
-            st.dataframe(pd.DataFrame(unassigned),
-                         use_container_width=True)
+    if unassigned:
+        st.warning(f"⚠️ {len(unassigned)} unassigned slots")
+        st.dataframe(
+            pd.DataFrame(unassigned),
+            use_container_width=True
+        )
 
 # =====================
 # DISPLAY ROSTER
@@ -309,20 +342,20 @@ query = """
         c.role,
         c.fleet,
         f.aircraft,
-        SPLIT_PART(f.callsign,'-',1)||'-'||
+        SPLIT_PART(f.callsign,'-',1) || '-' ||
         SPLIT_PART(f.callsign,'-',2) AS callsign,
         f.origin,
         f.destination,
-        TO_CHAR(f.dep_time,'HH24MI')    AS dep,
-        TO_CHAR(f.arr_time,'HH24MI')    AS arr,
+        TO_CHAR(f.dep_time,  'HH24MI') AS dep,
+        TO_CHAR(f.arr_time,  'HH24MI') AS arr,
         r.fdp_hours,
-        TO_CHAR(r.report_time,'HH24MI') AS report,
-        TO_CHAR(r.debrief_time,'HH24MI')AS debrief,
+        TO_CHAR(r.report_time,  'HH24MI') AS report,
+        TO_CHAR(r.debrief_time, 'HH24MI') AS debrief,
         r.status,
         r.override_flag
     FROM roster r
-    JOIN crew    c ON r.crew_id    = c.crew_id
-    JOIN flights f ON r.flight_id  = f.flight_id
+    JOIN crew    c ON r.crew_id   = c.crew_id
+    JOIN flights f ON r.flight_id = f.flight_id
     WHERE r.duty_date BETWEEN :sd AND :ed
 """
 params = {"sd": start_d, "ed": end_d}
@@ -334,7 +367,9 @@ if role_filter != "ALL":
     query += " AND c.role = :role"
     params["role"] = role_filter
 
-query += " ORDER BY r.duty_date, f.aircraft, c.role DESC, f.dep_time"
+query += """
+    ORDER BY r.duty_date, f.aircraft, c.role DESC, f.dep_time
+"""
 
 with engine.connect() as conn:
     df = pd.read_sql(text(query), conn, params=params)
@@ -346,28 +381,29 @@ else:
         df['duty_date']).dt.strftime('%d/%m/%y-%a')
 
     display_df = df[[
-        'date','role','name','crew_id','aircraft',
-        'callsign','origin','destination',
-        'dep','arr','report','debrief','fdp_hours',
-        'status','override_flag'
-    ]]
+        'date', 'role', 'name', 'crew_id', 'aircraft',
+        'callsign', 'origin', 'destination',
+        'dep', 'arr', 'report', 'debrief',
+        'fdp_hours', 'status', 'override_flag'
+    ]].copy()
+
     display_df.columns = [
-        'Date','Role','Name','ID','Aircraft',
-        'Callsign','From','To',
-        'DEP','ARR','Report','Debrief','FDP Hrs',
-        'Status','Override'
+        'Date', 'Role', 'Name', 'ID', 'Aircraft',
+        'Callsign', 'From', 'To',
+        'DEP', 'ARR', 'Report', 'Debrief',
+        'FDP Hrs', 'Status', 'Override'
     ]
 
-    total      = len(df)
-    overrides  = int(df['override_flag'].sum())
-    unassigned = len(df[df['status'] == 'UNASSIGNED'])
+    total     = len(df)
+    overrides = int(df['override_flag'].sum())
+    unassign  = len(df[df['status'] == 'UNASSIGNED'])
 
     st.markdown(f"""
-    <div style="display:flex;gap:3rem;font-size:0.95rem;
-    margin-bottom:1rem;font-weight:600;">
+    <div style="display:flex; gap:3rem; font-size:0.95rem;
+    margin-bottom:1rem; font-weight:600;">
         <span>📋 Total Assignments: <b>{total}</b></span>
         <span>⚠️ Overrides: <b>{overrides}</b></span>
-        <span>🔴 Unassigned: <b>{unassigned}</b></span>
+        <span>🔴 Unassigned: <b>{unassign}</b></span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -382,11 +418,13 @@ else:
 
     def color_row(row):
         if row['Override']:
-            return ['background-color:#4a3000']*len(row)
+            return ['background-color:#4a2800; color:#FFD580'] * len(row)
         if row['Status'] == 'UNASSIGNED':
-            return ['background-color:#4a0000']*len(row)
-        return ['']*len(row)
+            return ['background-color:#4a0000'] * len(row)
+        return [''] * len(row)
 
     st.dataframe(
         display_df.style.apply(color_row, axis=1),
-        use_container_width=True, height=600)
+        use_container_width=True,
+        height=600
+    )
