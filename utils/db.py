@@ -5,7 +5,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_engine():
-    return create_engine(os.getenv("DATABASE_URL"))
+    # Try Streamlit secrets first (cloud), then .env (local)
+    try:
+        import streamlit as st
+        db_url = st.secrets["DATABASE_URL"]
+    except Exception:
+        db_url = os.getenv("DATABASE_URL")
+    
+    if not db_url:
+        raise ValueError("DATABASE_URL not found in secrets or environment")
+    
+    return create_engine(db_url)
 
 def test_connection():
     try:
