@@ -388,6 +388,24 @@ with tab4:
                 'con': new_contract,'phone': new_phone,
                 'base': new_base,   'cid': crew_id
             })
+
+            conn.execute(text("""
+                INSERT INTO override_audit
+                (action_type, old_crew_id, old_value,
+                 new_value, remarks, system_generated)
+                VALUES (:at, :oc, :ov, :nv, :rm, FALSE)
+            """), {
+                'at': 'CERT_UPDATE',
+                'oc': crew_id,
+                'ov': 'Certification dates updated',
+                'nv': (
+                    f"Med:{new_medical} SEP:{new_sep} "
+                    f"TR:{new_tr} LPC:{new_lpc} "
+                    f"LC:{new_lc} Contract:{new_contract}"
+                ),
+                'rm': f"Cert renewal — {crew['name']}"
+            })
             conn.commit()
+
         st.success(f"✅ Certifications updated for {crew['name']}")
         st.rerun()
