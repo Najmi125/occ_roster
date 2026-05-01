@@ -1,3 +1,5 @@
+
+print("🚨 NEW SEED FUNCTION RUNNING 🚨")
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -82,54 +84,91 @@ def seed_crew():
         conn.commit()
         print("✅ Crew data seeded — 50 crew members")
 
+from datetime import date, timedelta, datetime
+from sqlalchemy import text
+
+
 def seed_flights():
     engine = get_engine()
-    base_schedule = [
-        ('A320-1','XYZ-101','KHI','ISB','06:00','08:00'),
-        ('A320-1','XYZ-102','ISB','KHI','08:45','10:45'),
-        ('A320-1','XYZ-103','KHI','LHE','11:30','13:20'),
-        ('A320-1','XYZ-104','LHE','KHI','14:05','15:55'),
-        ('A320-1','XYZ-105','KHI','DXB','20:40','22:55'),
-        ('A320-2','XYZ-201','KHI','DXB','06:00','08:15'),
-        ('A320-2','XYZ-202','DXB','KHI','09:15','11:30'),
-        ('A320-2','XYZ-203','KHI','ISB','12:15','14:15'),
-        ('A320-2','XYZ-204','ISB','KHI','15:00','17:00'),
-        ('A320-2','XYZ-205','KHI','LHE','17:45','19:35'),
-        ('A320-3','XYZ-301','KHI','LHE','06:00','07:50'),
-        ('A320-3','XYZ-302','LHE','JED','08:35','13:05'),
-        ('A330-1','XYZ-401','KHI','JED','06:00','10:30'),
-        ('A330-1','XYZ-402','JED','KHI','12:00','16:30'),
-        ('A330-2','XYZ-501','KHI','DXB','06:00','08:15'),
-        ('A330-2','XYZ-502','DXB','JED','09:15','13:15'),
-        ('A330-2','XYZ-503','JED','KHI','14:45','22:15'),
-    ]
+
+    rotations = {
+        'A320-1': [
+            ('KHI','ISB','06:00','08:00'),
+            ('ISB','KHI','08:45','10:45'),
+            ('KHI','LHE','11:30','13:20'),
+            ('LHE','KHI','14:05','15:55'),
+            ('KHI','DXB','17:00','19:10'),
+            ('DXB','KHI','20:30','22:40'),
+        ],
+        'A320-2': [
+            ('KHI','DXB','06:00','08:15'),
+            ('DXB','KHI','09:15','11:30'),
+            ('KHI','ISB','12:15','14:15'),
+            ('ISB','KHI','15:00','17:00'),
+            ('KHI','LHE','17:45','19:35'),
+            ('LHE','KHI','20:20','22:10'),
+        ],
+        'A320-3': [
+            ('KHI','LHE','06:00','07:50'),
+            ('LHE','JED','08:35','13:05'),
+            ('JED','KHI','18:00','22:30'),
+        ],
+        'A330-1': [
+            ('KHI','JED','06:00','10:30'),
+            ('JED','KHI','12:00','16:30'),
+        ],
+        'A330-2': [
+            ('KHI','DXB','06:00','08:15'),
+            ('DXB','JED','09:15','13:15'),
+            ('JED','KHI','14:45','22:15'),
+        ],
+    }
+
+    leg_map = {
+        'A320-1': ['XYZ-101','XYZ-102','XYZ-103','XYZ-104','XYZ-105','XYZ-106'],
+        'A320-2': ['XYZ-201','XYZ-202','XYZ-203','XYZ-204','XYZ-205','XYZ-206'],
+        'A320-3': ['XYZ-301','XYZ-302','XYZ-303'],
+        'A330-1': ['XYZ-401','XYZ-402'],
+        'A330-2': ['XYZ-501','XYZ-502','XYZ-503'],
+    }
 
     today = date.today()
+
     with engine.connect() as conn:
+        # Clear roster first (FK dependency), then flights
+        conn.execute(text("DELETE FROM roster"))
         conn.execute(text("DELETE FROM flights"))
+        conn.commit()
+
+        count = 0
         for day_offset in range(28):
             flight_date = today + timedelta(days=day_offset)
-            for f in base_schedule:
-                aircraft, base_callsign, origin, dest, dep_t, arr_t = f
-                callsign = f"{base_callsign}-{flight_date.strftime('%d%m')}"
-                dep_time = datetime.strptime(f"{flight_date} {dep_t}", "%Y-%m-%d %H:%M")
-                arr_time = datetime.strptime(f"{flight_date} {arr_t}", "%Y-%m-%d %H:%M")
-                if arr_time < dep_time:
-                    arr_time += timedelta(days=1)
-                conn.execute(text("""
-                    INSERT INTO flights
-                    (aircraft, callsign, origin, destination,
-                     dep_time, arr_time, flight_date)
-                    VALUES (:ac, :cs, :org, :dst, :dep, :arr, :fd)
-                """), {
-                    'ac': aircraft, 'cs': callsign,
-                    'org': origin, 'dst': dest,
-                    'dep': dep_time, 'arr': arr_time,
-                    'fd': flight_date
-                })
-        conn.commit()
-        print(f"✅ Flights seeded — 28 days x {len(base_schedule)} flights = {28*len(base_schedule)} records")
 
-if __name__ == "__main__":
-    seed_crew()
-    seed_flights()
+            for ac, pattern in rotations.items():
+                for leg_idx, (origin, dest, dep_t, arr_t) in enumerate(pattern):
+                    base_cs  = leg_map[ac][leg_idx]
+                    callsign = f"{base_cs}-{flight_date.strftime('%d%m')}"
+
+                    dep_time = datetime.strptime(
+                        f"{flight_date} {dep_t}", "%Y-%m-%d %H:%M")
+                    arr_time = datetime.strptime(
+                        f"{flight_date} {arr_t}", "%Y-%m-%d %H:%M")
+                    if arr_time < dep_time:
+                        arr_time += timedelta(days=1)
+
+                    conn.execute(text("""
+                        INSERT INTO flights
+                        (aircraft, callsign, origin, destination,
+                         dep_time, arr_time, flight_date)
+                        VALUES (:ac, :cs, :org, :dst, :dep, :arr, :fd)
+                    """), {
+                        'ac': ac, 'cs': callsign,
+                        'org': origin, 'dst': dest,
+                        'dep': dep_time, 'arr': arr_time,
+                        'fd': flight_date
+                    })
+                    count += 1
+
+        conn.commit()
+        print(f"✅ Flights seeded — {count} flights over 28 days")
+        print(f"   ({count//28} flights/day across 5 aircraft)")

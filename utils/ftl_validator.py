@@ -61,6 +61,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
             r.report_time,
             r.debrief_time,
             r.fdp_hours,
+            r.duty_id,
             r.status,
             r.override_flag,
             f.dep_time,
@@ -108,7 +109,31 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
 
     # ── Validate per crew ────────────────────────────────
     for cid, group in df.groupby('crew_id'):
-        group = group.sort_values('report_time').reset_index(drop=True)
+        group = group.sort_values(['report_time', 'duty_id']).reset_index(drop=True)
+
+        # Collapse multi-flight duties into single duty row
+        group = (
+            group.groupby(['duty_id'], as_index=False)
+            .agg({
+                'crew_id':         'first',
+                'report_time':     'first',
+                'debrief_time':    'first',
+                'fdp_hours':       'first',
+                'duty_date':       'first',
+                'name':            'first',
+                'role':            'first',
+                'fleet':           'first',
+                'aircraft':        'first',
+                'medical_exp':     'first',
+                'sep_exp':         'first',
+                'type_rating_exp': 'first',
+                'lpc_opc_exp':     'first',
+                'line_check_exp':  'first',
+                'contract_expiry': 'first',
+            })
+            .sort_values('report_time')
+            .reset_index(drop=True)
+        )
         crew_name  = group['name'].iloc[0]
         crew_fleet = group['fleet'].iloc[0]
         fleet_type = 'A330' if crew_fleet == 'A330' else 'A320'
@@ -139,7 +164,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                 crew_violations.append({
                     'crew_id':    cid,
                     'crew_name':  crew_name,
-                    'flight_id':  row['flight_id'],
+                    'flight_id': None,
                     'duty_date':  duty_date,
                     'type':       'MAX_FDP_EXCEEDED',
                     'rule':       f"Max FDP {max_fdp}h ({fleet_type})",
@@ -160,7 +185,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                     crew_violations.append({
                         'crew_id':   cid,
                         'crew_name': crew_name,
-                        'flight_id': row['flight_id'],
+                        'flight_id': None,
                         'duty_date': duty_date,
                         'type':      'INSUFFICIENT_REST',
                         'rule':      f"Min rest {CAA_RULES['min_rest_hours']}h",
@@ -175,7 +200,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                     crew_warnings.append({
                         'crew_id':   cid,
                         'crew_name': crew_name,
-                        'flight_id': row['flight_id'],
+                        'flight_id': None,
                         'duty_date': duty_date,
                         'type':      'REST_MARGIN_LOW',
                         'rule':      "Rest within 2h of minimum",
@@ -198,7 +223,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                 crew_violations.append({
                     'crew_id':   cid,
                     'crew_name': crew_name,
-                    'flight_id': row['flight_id'],
+                    'flight_id': None,
                     'duty_date': duty_date,
                     'type':      '7DAY_HOURS_EXCEEDED',
                     'rule':      f"Max 7-day hours {max_7day}h",
@@ -212,7 +237,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                 crew_warnings.append({
                     'crew_id':   cid,
                     'crew_name': crew_name,
-                    'flight_id': row['flight_id'],
+                    'flight_id': None,
                     'duty_date': duty_date,
                     'type':      '7DAY_HOURS_WARNING',
                     'rule':      "7-day hours >85% of limit",
@@ -240,7 +265,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                     crew_violations.append({
                         'crew_id':   cid,
                         'crew_name': crew_name,
-                        'flight_id': row['flight_id'],
+                        'flight_id': None,
                         'duty_date': duty_date,
                         'type':      'EXPIRED_DOCUMENT',
                         'rule':      f"{doc_name} must be valid",
@@ -261,7 +286,7 @@ def validate_roster(start_d=None, end_d=None, crew_id=None):
                     crew_violations.append({
                         'crew_id':   cid,
                         'crew_name': crew_name,
-                        'flight_id': row['flight_id'],
+                        'flight_id': None,
                         'duty_date': duty_date,
                         'type':      'OVERLAPPING_DUTIES',
                         'rule':      "No simultaneous duties",
