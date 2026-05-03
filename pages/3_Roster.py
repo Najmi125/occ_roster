@@ -140,6 +140,9 @@ def generate_roster(start_d, end_d):
         # 28-day hours
         if state['hours_28day'] + fdp > CAA_RULES['max_28day_hours']:
             return False
+        # Hard utilization cap
+        if state['hours_28day'] > 160:
+            return False
 
         return True
 
@@ -158,12 +161,20 @@ def generate_roster(start_d, end_d):
                 continue
             if s['current_city'] != origin:
                 continue
+            # Soft skip overused crew
+            if s['hours_28day'] > 120:
+                continue
             if not is_legal(s, duty, duty_date):
                 continue
 
-            score = -s['hours_28day']
-            if duty['ends_at'] == 'KHI' and s['current_city'] != 'KHI':
-                score += 5
+            # Fair rotation scoring
+            score = 0
+            score -= s['hours_28day'] * 2          # penalize high hours
+            score -= len(s['assigned_duties']) * 1.5  # penalize many duties
+            if s['current_city'] == origin:
+                score += 3                          # prefer crew already at origin
+            if duty['ends_at'] == 'KHI':
+                score += 2                          # encourage return to base
             best.append((score, cid))
 
         if not best:
@@ -288,7 +299,7 @@ def generate_roster(start_d, end_d):
                         'crew_id':    cid,
                         'flight_id':  fid,
                         'duty_date':  current,
-                        'duty_id':    duty['duty_id'],
+                        'duty_id':    f"{duty['duty_id']}-{current.strftime('%d%m')}",
                         'report_dt':  duty['report_dt'],
                         'debrief_dt': duty['debrief_dt'],
                         'fdp_hours':  duty['fdp_hrs'],

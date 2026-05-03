@@ -15,8 +15,11 @@ st.set_page_config(
 # ================= HEADER =================
 st.title("✈️ Airline Operations Control Platform")
 
+st.markdown("### AI-powered Planning & Scheduling Management")
+st.markdown("---")
+
 st.markdown("""
-### Built on a Demo Operations Model  
+### Built on a Demo Model  
 **XYZ Airline — KHI Base |2xA330 + 3xA320 | 17 Daily Flights | 50 Pilots**
 """)
 
@@ -29,13 +32,10 @@ st.markdown(f"**{status_text} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 🕒 {curren
 
 st.markdown("---")
 
-st.markdown("### AI-powered Planning & Scheduling Management")
-st.markdown("---")
-
 st.markdown("### <u><b>What does it do?</b></u>", unsafe_allow_html=True)
 
 st.markdown("""
-- **Intelligent Crew Rostering** — 28-day rolling schedules. Fair duty distribution 
+- **Intelligent Crew Rostering** — Generates 28-days rolling schedules. Fair duty distribution 
 - **Compliance Engine** — Enforces PCAA FDTL regulations. Tracks crew qualifications expiry.  
 - **OCC Override Control** — Real-time disruption handling. Airline OCC can enforce any flt/crew changes.  
 - **Re-Optimization Engine** — Regenerates roster after human inserted changes in less than 1 minute  
